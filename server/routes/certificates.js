@@ -1,7 +1,7 @@
 const express = require('express');
 const Certificate = require('../models/Certificate');
 const adminOnly = require('../middleware/auth');
-const { upload, removeFile } = require('../middleware/upload');
+const { upload, saveImage, deleteImage } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -15,6 +15,8 @@ const handleUpload = (req, res, next) => {
   });
 };
 
+const UPLOAD_FAILED = 'Image upload fail hui. Cloudinary settings check karo.';
+
 // PUBLIC: sab certificates dekh sakte hain
 router.get('/', async (req, res) => {
   try {
@@ -27,20 +29,29 @@ router.get('/', async (req, res) => {
 
 // ADMIN: add (multipart/form-data, field name: image)
 router.post('/', adminOnly, handleUpload, async (req, res) => {
-  try {
-    if (!req.body.title) {
-      if (req.file) removeFile(`/uploads/${req.file.filename}`);
-      return res.status(400).json({ message: 'Title required' });
+  if (!req.body.title) {
+    return res.status(400).json({ message: 'Title required' });
+  }
+
+  let img = { image: '', imagePublicId: '' };
+  if (req.file) {
+    try {
+      img = await saveImage(req.file, 'portfolio/certificates');
+    } catch (err) {
+      return res.status(502).json({ message: UPLOAD_FAILED });
     }
+  }
+
+  try {
     const item = await Certificate.create({
       title: req.body.title,
       issuer: req.body.issuer || '',
       date: req.body.date || '',
-      image: req.file ? `/uploads/${req.file.filename}` : '',
+      ...img,
     });
     res.status(201).json(item);
   } catch (err) {
-    if (req.file) removeFile(`/uploads/${req.file.filename}`);
+    await deleteImage(img);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -49,37 +60,50 @@ router.post('/', adminOnly, handleUpload, async (req, res) => {
 router.put('/:id', adminOnly, handleUpload, async (req, res) => {
   try {
     const item = await Certificate.findById(req.params.id);
-    if (!item) {
-      if (req.file) removeFile(`/uploads/${req.file.filename}`);
-      return res.status(404).json({ message: 'Certificate not found' });
-    }
+    if (!item) return res.status(404).json({ message: 'Certificate not found' });
+
+    const old = { image: item.image, imagePublicId: item.imagePublicId };
 
     if (req.body.title) item.title = req.body.title;
     if (req.body.issuer !== undefined) item.issuer = req.body.issuer;
     if (req.body.date !== undefined) item.date = req.body.date;
 
+    let replaced = false;
+    let uploaded = null;
     if (req.file) {
-      removeFile(item.image);
-      item.image = `/uploads/${req.file.filename}`;
+      try {
+        uploaded = await saveImage(req.file, 'portfolio/certificates');
+      } catch (err) {
+        return res.status(502).json({ message: UPLOAD_FAILED });
+      }
+      item.image = uploaded.image;
+      item.imagePublicId = uploaded.imagePublicId;
+      replaced = true;
     } else if (req.body.removeImage === 'true') {
-      removeFile(item.image);
       item.image = '';
+      item.imagePublicId = '';
+      replaced = true;
     }
 
-    await item.save();
+    try {
+      await item.save();
+    } catch (err) {
+      await deleteImage(uploaded);
+      throw err;
+    }
+    if (replaced) await deleteImage(old);
     res.json(item);
   } catch (err) {
-    if (req.file) removeFile(`/uploads/${req.file.filename}`);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// ADMIN: delete (image file bhi hat jati hai)
+// ADMIN: delete (image bhi hat jati hai)
 router.delete('/:id', adminOnly, async (req, res) => {
   try {
     const item = await Certificate.findByIdAndDelete(req.params.id);
     if (!item) return res.status(404).json({ message: 'Certificate not found' });
-    removeFile(item.image);
+    await deleteImage(item);
     res.json({ message: 'Certificate deleted' });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });

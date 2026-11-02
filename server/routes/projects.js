@@ -1,7 +1,7 @@
 const express = require('express');
 const Project = require('../models/Project');
 const adminOnly = require('../middleware/auth');
-const { upload, removeFile } = require('../middleware/upload');
+const { upload, saveImage, deleteImage } = require('../middleware/upload');
 
 const router = express.Router();
 
@@ -23,6 +23,8 @@ const handleUpload = (req, res, next) => {
   });
 };
 
+const UPLOAD_FAILED = 'Image upload fail hui. Cloudinary settings check karo.';
+
 // PUBLIC: sab projects dekh sakte hain
 router.get('/', async (req, res) => {
   try {
@@ -35,23 +37,32 @@ router.get('/', async (req, res) => {
 
 // ADMIN: add (multipart/form-data, field name: image)
 router.post('/', adminOnly, handleUpload, async (req, res) => {
-  try {
-    const { title, description } = req.body;
-    if (!title || !description) {
-      if (req.file) removeFile(`/uploads/${req.file.filename}`);
-      return res.status(400).json({ message: 'Title and description required' });
+  const { title, description } = req.body;
+  if (!title || !description) {
+    return res.status(400).json({ message: 'Title and description required' });
+  }
+
+  let img = { image: '', imagePublicId: '' };
+  if (req.file) {
+    try {
+      img = await saveImage(req.file, 'portfolio/projects');
+    } catch (err) {
+      return res.status(502).json({ message: UPLOAD_FAILED });
     }
+  }
+
+  try {
     const project = await Project.create({
       title,
       description,
       tech: parseTech(req.body.tech),
       liveUrl: req.body.liveUrl || '',
       githubUrl: req.body.githubUrl || '',
-      image: req.file ? `/uploads/${req.file.filename}` : '',
+      ...img,
     });
     res.status(201).json(project);
   } catch (err) {
-    if (req.file) removeFile(`/uploads/${req.file.filename}`);
+    await deleteImage(img);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -60,10 +71,9 @@ router.post('/', adminOnly, handleUpload, async (req, res) => {
 router.put('/:id', adminOnly, handleUpload, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
-    if (!project) {
-      if (req.file) removeFile(`/uploads/${req.file.filename}`);
-      return res.status(404).json({ message: 'Project not found' });
-    }
+    if (!project) return res.status(404).json({ message: 'Project not found' });
+
+    const old = { image: project.image, imagePublicId: project.imagePublicId };
 
     if (req.body.title) project.title = req.body.title;
     if (req.body.description) project.description = req.body.description;
@@ -71,28 +81,42 @@ router.put('/:id', adminOnly, handleUpload, async (req, res) => {
     if (req.body.liveUrl !== undefined) project.liveUrl = req.body.liveUrl;
     if (req.body.githubUrl !== undefined) project.githubUrl = req.body.githubUrl;
 
+    let replaced = false;
+    let uploaded = null;
     if (req.file) {
-      removeFile(project.image);
-      project.image = `/uploads/${req.file.filename}`;
+      try {
+        uploaded = await saveImage(req.file, 'portfolio/projects');
+      } catch (err) {
+        return res.status(502).json({ message: UPLOAD_FAILED });
+      }
+      project.image = uploaded.image;
+      project.imagePublicId = uploaded.imagePublicId;
+      replaced = true;
     } else if (req.body.removeImage === 'true') {
-      removeFile(project.image);
       project.image = '';
+      project.imagePublicId = '';
+      replaced = true;
     }
 
-    await project.save();
+    try {
+      await project.save();
+    } catch (err) {
+      await deleteImage(uploaded);
+      throw err;
+    }
+    if (replaced) await deleteImage(old);
     res.json(project);
   } catch (err) {
-    if (req.file) removeFile(`/uploads/${req.file.filename}`);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// ADMIN: delete (image file bhi hat jati hai)
+// ADMIN: delete (image bhi hat jati hai)
 router.delete('/:id', adminOnly, async (req, res) => {
   try {
     const project = await Project.findByIdAndDelete(req.params.id);
     if (!project) return res.status(404).json({ message: 'Project not found' });
-    removeFile(project.image);
+    await deleteImage(project);
     res.json({ message: 'Project deleted' });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
